@@ -21,3 +21,9 @@ cp -r bigquant-dai bigquant-option bigquant-stock /path/to/your/project/.claude/
 ## Usage
 
 These skills are automatically triggered by Claude Code when relevant tasks are detected (e.g., writing DAI queries, developing stock/option strategies).
+
+## Recent Updates
+
+- **bigquant-option**: Updated position API (PyPosition composite object), order query fields, `data.history()` limitation notes, dai query alternatives for historical data
+- **bigquant-dai**: Synced latest table schemas and SQL patterns
+- **bigquant-stock**: Synced latest factors and strategy references
