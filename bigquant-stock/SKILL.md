@@ -421,6 +421,27 @@ performance = bigtrader.run(
 )
 ```
 
+## 查看回测结果
+
+```python
+# 回测完成后，用 summary 获取关键指标
+performance.summary
+# 返回 DataFrame，包含：年化收益率、夏普比率、最大回撤、胜率等
+```
+
+常用字段：
+
+| 字段 | 说明 |
+|------|------|
+| `annualized_returns` | 年化收益率 |
+| `sharpe` | 夏普比率 |
+| `max_drawdown` | 最大回撤 |
+| `alpha` | 超额收益（相对基准） |
+| `beta` | Beta 系数 |
+| `information_ratio` | 信息比率 |
+
+> `performance.summary` 是 DataFrame，直接在 notebook 中输出即可渲染表格。
+
 ---
 
 ## 常用因子速查

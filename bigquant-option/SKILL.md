@@ -61,6 +61,13 @@ def handle_data(context: bigtrader.IContext, data: bigtrader.IBarData):
     # 策略逻辑 ...
     pass
 
+# ── handle_order（可选，需要报撤单管理时传入）────────────────
+def handle_order(context: bigtrader.IContext, order):
+    # 委托状态变更回调（报单确认/成交/撤单/废单均触发）
+    # 实盘中 order_key 异步返回，只有在此回调中才能可靠获取
+    # 废单（交易所拒绝）也会触发此回调，但废单没有有效 order_key
+    pass
+
 # ── 运行回测 ──────────────────────────────────────────────────
 Q = bigtrader.run(
     market=bigtrader.Market.CN_STOCK_OPTION,
@@ -73,6 +80,7 @@ Q = bigtrader.run(
     initialize=initialize,
     before_trading_start=before_trading_start,
     handle_data=handle_data,
+    handle_order=handle_order,   # 可选；需要报撤单管理时必须传入
 )
 ```
 
@@ -90,8 +98,10 @@ ret = context.buy_open(symbol, qty)
 if ret < 0:
     context.logger.error(f"买入开仓失败: {context.get_error_msg(ret)}")
 else:
-    order_key = context.get_last_order_key()  # 获取委托唯一编号，用于后续追踪
-    context.logger.info(f"买入开仓 {symbol} {qty} 张，order_key={order_key}")
+    # 注意：回测中 order_key 立即可用；实盘中委托号异步返回，此处可能为空或上一笔的 key
+    # 实盘应通过 handle_order 回调获取可靠的 order_key，不要在此处依赖它
+    order_key = context.get_last_order_key()
+    context.logger.info(f"买入开仓 {symbol} {qty} 张")
 ```
 
 **期权专用四向接口**（明确指定 offset=OPEN/CLOSE，推荐用于期权）：
@@ -135,7 +145,146 @@ all_orders  = context.get_orders(symbol)        # 查询当日所有委托（含
 trades      = context.get_trades(symbol)        # 查询当日成交记录
 ```
 
-**OrderData 字段**（`get_orders` / `get_open_orders` 返回的对象）：
+### handle_order 委托回报回调
+
+`handle_order(context, order)` 是委托状态变更的回调函数，每次委托状态发生变化时触发。
+
+`handle_order` 是可选参数，但**需要报撤单管理时必须通过它实现**，原因：
+- 实盘存在网络延迟，下单后 `get_last_order_key()` 可能为空或返回上一笔的 key
+- `handle_data` 中检测不到 order_key 不代表未下单，直接重新下单会导致重复委托
+- 废单（交易所拒绝）也通过此回调通知，但废单没有有效的 order_key
+
+**回测中已验证的触发行为**（2026-04-15 实测）：
+
+一笔限价单从下单到成交，`handle_order` 触发 **3次**，状态序列为：
+```
+WAITCONFIRM(6) → NOTTRADED(0) → ALLTRADED(2)
+```
+主动撤单（`cancel_order`）同样触发 **3次**：
+```
+WAITCONFIRM(6) → NOTTRADED(0) → CANCELLED(4)
+```
+**部分成交（PARTTRADED）**：回测中大单（1000张）在流动性不足时会发生部分成交，触发 **4次** handle_order：
+```
+WAITCONFIRM(6) → NOTTRADED(0) → PARTTRADED(1) → ALLTRADED(2)
+```
+`status_msg='PartTraded'`，`filled_qty` 反映当前已成交量（如 557/1000）。若在 PARTTRADED 之前主动撤单，最终状态为 CANCELLED，`filled_qty` 反映撤单时已成交部分。
+
+**收盘自动撤销不触发 `handle_order`**：日终未成交的限价单被系统撤销时，不会产生任何回调，委托在 `get_open_orders` 中直接消失。
+
+**`handle_order` 中可以调用 `get_orders`/`get_open_orders`**，且数据已反映当前状态：
+- 成交时：`get_open_orders` 已不含该单，`get_orders` 中 `filled_qty` 已更新
+- 撤单时：`get_open_orders` 已不含该单，`get_orders` 中 `filled_qty=0`
+- 报单确认/未成交时：两者均包含该单
+
+**`handle_order` 中可以下单**，返回值正常，新单会立即触发新的 `handle_order` 回调。
+
+**`order_status` 实际枚举值**（回测中观测到）：
+
+| 值 | 枚举名 | `status_msg` | 含义 |
+|----|--------|--------------|------|
+| 6 | `WAITCONFIRM` | `''` | 报单已提交，等待交易所确认 |
+| 0 | `NOTTRADED` | `'NotTraded'` | 已确认，尚未成交 |
+| 1 | `PARTTRADED` | `'PartTraded'` | 部分成交（大单流动性不足时发生） |
+| 2 | `ALLTRADED` | `'AllTraded'` | 全部成交 |
+| 4 | `CANCELLED` | `'Cancelled'` | 已撤单（主动撤或部分成交后撤） |
+| 5 | `REJECTED` | — | 废单（交易所拒绝）— 回测中极端高价下单直接返回负错误码，不触发此状态 |
+
+```python
+from bigquant.bigtrader import OrderStatus
+# 可用枚举：NOTTRADED PARTTRADED ALLTRADED PARTCANCELLED CANCELLED
+#           REJECTED UNKNOWN WAITCONFIRM ACCEPTED EXPIRED 等
+```
+
+**职责分工原则**：
+- `handle_data` — 只负责**信号判断**和**触发下单**，下单后立即标记在途状态，不做任何委托跟踪
+- `handle_order` — 负责**全部委托状态管理**：成交确认、超时撤单、重试、废单处理
+
+handle_data 中只需一个简单的"有在途委托则跳过"检查，所有超时/重试/撤单逻辑都放在 handle_order 里。
+
+**推荐的报撤单管理模式**：
+
+```python
+def initialize(context):
+    context.user_store.init_once(
+        pending=None,        # 当前在途委托信息 {key, symbol, placed_bar, qty, retry}
+        # 或用 None 表示无在途委托
+    )
+
+def handle_data(context, data):
+    # handle_data 只做两件事：
+    # 1. 有在途委托时跳过（委托跟踪完全交给 handle_order）
+    if context.user_store['pending'] is not None:
+        return
+    # 2. 信号判断 + 下单 + 标记在途
+    if 信号触发:
+        price = _safe_price(data, symbol)
+        if price:
+            ret = context.buy_open(symbol, qty, limit_price=price * 1.002)
+            if ret >= 0:
+                context.user_store['pending'] = {
+                    'key': context.get_last_order_key(),
+                    'symbol': symbol,
+                    'qty': qty,
+                    'placed_bar': data.current_dt,
+                    'retry': 0,
+                }
+
+def handle_order(context, order):
+    pending = context.user_store['pending']
+    if pending is None:
+        return
+    if order.order_key != pending['key']:
+        return  # 不是当前跟踪的委托（如 before_trading_start 中的残留）
+
+    status = order.order_status
+    symbol = order.instrument
+
+    # 废单
+    if status == OrderStatus.REJECTED:
+        context.logger.warning(f"废单: {order.status_msg}")
+        context.user_store['pending'] = None
+        return
+
+    # 全部成交
+    if status == OrderStatus.ALLTRADED:
+        context.logger.info(f"成交 {symbol} {order.filled_qty} 张")
+        # 在此做成交后的业务逻辑（更新仓位记录等）
+        context.user_store['pending'] = None
+        return
+
+    # 撤单（主动撤或部分成交后撤）
+    if status == OrderStatus.CANCELLED:
+        filled = order.filled_qty
+        remaining = pending['qty'] - filled
+        if filled > 0:
+            # 部分成交：先处理已成交部分
+            context.logger.info(f"部分成交后撤单 {symbol}，已成交 {filled} 张，剩余 {remaining} 张")
+        if remaining > 0 and pending['retry'] < 3:
+            # 重试：在 handle_order 中直接补单
+            price = context.get_last_price(symbol)
+            if price and price > 0:
+                ret = context.buy_open(symbol, remaining, limit_price=price * 1.002)
+                if ret >= 0:
+                    pending['key'] = context.get_last_order_key()
+                    pending['qty'] = remaining
+                    pending['retry'] += 1
+                    context.logger.info(f"重试第{pending['retry']}次，{remaining} 张")
+                    return
+        context.user_store['pending'] = None
+```
+
+**before_trading_start 中必须清理前一天的在途状态**（收盘自动撤不触发 handle_order）：
+
+```python
+def before_trading_start(context, data):
+    if context.user_store['pending'] is not None:
+        context.logger.warning("盘前发现未完成委托（收盘自动撤），已清除")
+        context.user_store['pending'] = None
+    # ... 其他初始化
+```
+
+**OrderData 字段**（`get_orders` / `get_open_orders` 返回的对象，`handle_order` 的 `order` 参数同结构）：
 
 ```python
 order.account_id       # str: 资金账户
@@ -147,24 +296,33 @@ order.offset_flag      # OffsetFlag: '0'-OPEN, '1'-CLOSE, '2'-CLOSETODAY
 order.order_type       # OrderType: '0'-限价, 'U'-市价五档即成剩撤
 order.order_qty        # int: 委托数量
 order.filled_qty       # int: 已成交数量
-order.order_price      # float: 委托价格
-order.order_status     # OrderStatus: 委托状态
+order.order_price      # float: 委托价格（含滑点后的实际委托价）
+order.order_status     # OrderStatus: 委托状态（见上表）
 order.order_sysid      # str: 系统报单编号
-order.order_key        # str: 本地唯一标识
+order.order_key        # str: 本地唯一标识，回测中格式为 'N_0_0'，WAITCONFIRM 阶段即有值
 order.insert_date      # int: 报单日期 (YYYYmmdd)
 order.order_time       # int: 报单时间 (HHMMSSmmm)
 order.trading_day      # int: 交易日 (YYYYmmdd)
-order.status_msg       # str: 报单状态消息
+order.status_msg       # str: 报单状态消息（如 'AllTraded', 'Cancelled', ''）
 ```
 
 **委托生命周期规则**：
-- 回测中限价单为**当日有效**（day order），收盘自动撤销
-- `cancel_order` 在下一个 `handle_data` 调用前即生效（同 bar 内不阻塞，但下根 bar 前处理完毕）
-- 不要在回调中阻塞等待成交，事件队列在回调返回后才处理下一个事件
-- 判断是否全部成交：`order.filled_qty == order.order_qty`
-- 判断部分成交：`0 < order.filled_qty < order.order_qty`
-- 同一合约可重复下单，底层独立处理每个订单，不会互相冲突或拒绝
-- **追单必须先撤后补**：直接追加新单会导致旧单后续成交时超买，正确流程为 `cancel_all(symbol)` → 等一根 bar → 查实际持仓 → 报新单补差额
+- 回测中限价单为**当日有效**（day order），收盘自动撤销，**但不触发 handle_order**，需在 `before_trading_start` 中主动清理在途状态
+- 一笔正常成交的限价单触发 3 次 handle_order：`WAITCONFIRM → NOTTRADED → ALLTRADED`
+- 主动撤单触发 3 次：`WAITCONFIRM → NOTTRADED → CANCELLED`
+- 大单部分成交触发 4 次：`WAITCONFIRM → NOTTRADED → PARTTRADED → ALLTRADED`（或最终 CANCELLED）
+- `order_key` 在第一次触发（WAITCONFIRM）时即有值，回测中格式为 `'N_0_0'`
+- `cancel_order` 在下一个 bar 开始前生效，CANCELLED 回调在该 bar 的 handle_data 之前触发
+- `handle_order` 中可以安全调用 `get_orders`/`get_open_orders`，数据已是最新状态
+- `handle_order` 中可以下单，新单会立即触发新的 handle_order 回调（注意避免递归）
+- 判断全部成交：`status == OrderStatus.ALLTRADED`
+- 判断撤单：`status == OrderStatus.CANCELLED`（含部分成交后撤，此时 `filled_qty > 0`）
+- 判断部分成交：`status == OrderStatus.PARTTRADED`（`filled_qty` 为当前已成交量）
+- 同一合约可重复下单，底层独立处理每个订单
+- **追单必须先撤后补**：直接追加新单会导致旧单后续成交时超买，正确流程为 `cancel_order(key)` → 在 CANCELLED 回调中补单
+- **实盘 order_key 异步返回**：回测中下单后 `get_last_order_key()` 立即可用；实盘存在网络延迟，委托号异步返回，`handle_data` 中检测不到 order_key 不代表未下单，切勿据此重复下单。实盘应通过 `handle_order` 回调管理委托状态
+- **废单（REJECTED）在回测中的行为**：极端价格（如 limit_price=99999）下单时，回测直接返回负错误码（如 `-114`），**不触发 handle_order**，不产生委托。`sell_close` 无持仓时，回测**不校验持仓**，会正常成交（触发 3 次 handle_order，最终 ALLTRADED）
+- **`before_trading_start` 中 `get_open_orders`/`get_orders` 返回空**：收盘自动撤后，第二天 BTS 中两个接口均返回空列表，前一天的委托完全不可见。盘前清理逻辑只需重置 `pending` 状态变量，无需依赖查询接口
 
 ### 日志
 
@@ -469,6 +627,29 @@ from bigquant.bigtrader import (
 | 中金所 股指期权/期货 | .CFE | IO2501-C-4300.CFE |
 | 上交所 股票/ETF | .SH | 510050.SH、588000.SH |
 | 深交所 股票/ETF | .SZ | 159919.SZ |
+
+---
+
+## 查看回测结果
+
+```python
+# 回测完成后，用 summary 获取关键指标
+Q.summary
+# 返回 DataFrame，包含：年化收益率、夏普比率、最大回撤、胜率等
+```
+
+常用字段：
+
+| 字段 | 说明 |
+|------|------|
+| `annualized_returns` | 年化收益率 |
+| `sharpe` | 夏普比率 |
+| `max_drawdown` | 最大回撤 |
+| `alpha` | 超额收益（相对基准） |
+| `beta` | Beta 系数 |
+| `information_ratio` | 信息比率 |
+
+> `Q.summary` 是 DataFrame，直接在 notebook 中输出即可渲染表格。
 
 ---
 
