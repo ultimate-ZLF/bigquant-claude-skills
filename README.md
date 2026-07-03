@@ -6,25 +6,20 @@ Claude Code skills for quantitative trading on the BigQuant platform (Chinese A-
 
 | Skill | Description |
 |-------|-------------|
-| `bigquant-dai` | DAI data query — SQL tables, filters, functions, and patterns |
-| `bigquant-option` | ETF options strategy development with bigtrader |
-| `bigquant-stock` | Stock selection strategy development with bigtrader |
-| `bigquant-coder` | Combined skill covering DAI queries, stock selection, option strategies, and futures CTA |
+| `bigquant-coder` | DAI data queries, stock selection strategies, ETF option strategies, and futures CTA strategies with bigtrader |
 
 ## Installation
 
-Copy the skill directories into your project's `.claude/skills/` folder:
+Copy the skill directory into your project's `.claude/skills/` folder:
 
 ```bash
-cp -r bigquant-dai bigquant-option bigquant-stock bigquant-coder /path/to/your/project/.claude/skills/
+cp -r bigquant-coder /path/to/your/project/.claude/skills/
 ```
 
 ## Usage
 
-These skills are automatically triggered by Claude Code when relevant tasks are detected (e.g., writing DAI queries, developing stock/option strategies).
+This skill is automatically triggered by Claude Code when relevant tasks are detected (e.g., writing DAI queries, developing stock/option/futures strategies).
 
 ## Recent Updates
 
-- **bigquant-option**: Updated position API (PyPosition composite object), order query fields, `data.history()` limitation notes, dai query alternatives for historical data
-- **bigquant-dai**: Synced latest table schemas and SQL patterns
-- **bigquant-stock**: Synced latest factors and strategy references
+- **bigquant-coder**: Replaces the former `bigquant-dai` / `bigquant-option` / `bigquant-stock` skills with a single combined skill; added DAI UDF (`dai.DaiUDF`) documentation
