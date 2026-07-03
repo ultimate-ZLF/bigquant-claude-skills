@@ -63,8 +63,38 @@
 
 | 字段 | 说明 |
 |------|------|
-| `sw2021_level1` | 申万2021一级行业 |
+| `sw2021_level1` | 申万2021一级行业（文本，如 `'银行'`） |
 | `sw2021_level2` | 申万2021二级行业 |
+| `list_sector` | 上市板块（1=上交所主板, 2=深交所主板, 3=创业板） |
+
+### 申万一级行业指数字段
+
+每只股票所属申万一级行业的指数行情，随日线数据同步更新，可直接用于行业动量、轮动类策略。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `sw_level1_name` | VARCHAR | 申万一级行业名称（2021版），如 `'银行'` |
+| `sw_level_index_code` | VARCHAR | 申万一级行业指数代码，如 `'801780.SI'` |
+| `sw_level1_close` | DOUBLE | 所属申万一级行业指数收盘价 |
+| `sw_level1_open` | DOUBLE | 所属申万一级行业指数开盘价 |
+| `sw_level1_high` | DOUBLE | 所属申万一级行业指数最高价 |
+| `sw_level1_low` | DOUBLE | 所属申万一级行业指数最低价 |
+| `sw_level1_volume` | DOUBLE | 所属申万一级行业指数成交量 |
+| `sw_level1_amount` | DOUBLE | 所属申万一级行业指数成交额 |
+| `sw_level1_turn` | DOUBLE | 所属申万一级行业指数换手率 |
+
+**典型用法：行业动量因子**
+
+```sql
+-- 行业近20日动量（用于行业轮动或行业中性化）
+SELECT date, instrument,
+    sw_level1_name,
+    sw_level1_close / m_lag(sw_level1_close, 20) - 1 AS industry_momentum_20d
+FROM cn_stock_prefactors
+WHERE st_status = 0 AND suspended = 0
+QUALIFY COLUMNS(*) IS NOT NULL
+ORDER BY date, industry_momentum_20d DESC
+```
 
 ---
 

@@ -9,13 +9,14 @@ Claude Code skills for quantitative trading on the BigQuant platform (Chinese A-
 | `bigquant-dai` | DAI data query — SQL tables, filters, functions, and patterns |
 | `bigquant-option` | ETF options strategy development with bigtrader |
 | `bigquant-stock` | Stock selection strategy development with bigtrader |
+| `bigquant-coder` | Combined skill covering DAI queries, stock selection, option strategies, and futures CTA |
 
 ## Installation
 
 Copy the skill directories into your project's `.claude/skills/` folder:
 
 ```bash
-cp -r bigquant-dai bigquant-option bigquant-stock /path/to/your/project/.claude/skills/
+cp -r bigquant-dai bigquant-option bigquant-stock bigquant-coder /path/to/your/project/.claude/skills/
 ```
 
 ## Usage

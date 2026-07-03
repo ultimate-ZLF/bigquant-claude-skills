@@ -428,3 +428,136 @@ performance = bigtrader.run(
 ```
 
 **核心思路**：用多个WHERE条件构建高质量候选池（ROE稳定+成长+低负债+合理估值），然后用单一强因子（股息率）排序选股。这种模式比复杂的多因子合成更稳健，且完全避免了Python端的内存问题。
+
+---
+
+## 模式八：期货 CTA 状态机（已验证可运行）
+
+用 `enum.Enum` 显式定义持仓状态，`handle_data` 内用 `while True` 循环在同一 bar 内完成"平旧开新"翻转。
+来源：`Future/CTA-DualThrust/simple_cta.ipynb`，日频，标的 `jm2609.DCE`，回测期 2026-06-01 至 2026-06-22。
+
+```python
+from bigquant import bigtrader
+from enum import Enum
+
+class S(Enum):
+    """Strategy States"""
+    IDLE = 'idle'
+    LONG = 'long'
+    SHORT = 'short'
+
+def initialize(context: bigtrader.IContext):
+    """策略初始函数，每次启动时调用一次"""
+    context.security = context.instruments[0]
+
+    # 设置期货交易费率
+    context.set_commission(futures_commission=bigtrader.PerContract(
+        cost={"rb": (2, 2, 1), "IF": (0.000023, 0.00015, 0.000023)}
+    ))
+    # 设置期货保证金率
+    context.set_margin_ratio("IF", 0.15)
+    # 设置交易滑点
+    context.set_slippage_value(slippage_type=2, slippage_value=0.001)
+
+    # 自定义状态
+    context.state = S.IDLE
+
+def before_trading_start(context: bigtrader.IContext, data: bigtrader.IBarData):
+    """每日盘前处理函数"""
+    pass
+
+def handle_data(context: bigtrader.IContext, data: bigtrader.IBarData):
+    """K线处理函数，每根K线时间调用一次"""
+    last_price = data.current(context.security, 'close')
+    direction = 'long' if last_price / data.current(context.security, 'pre_close') >= 1 else 'short'
+
+    # 持仓外部变动（如强平）时同步状态
+    if context.security not in context.portfolio.positions:
+        context.state = S.IDLE
+
+    while True:
+        if context.state == S.IDLE:
+            if direction == 'long':
+                rv = context.buy_open(context.security, 5, limit_price=last_price * 1.01)
+                if rv < 0:
+                    context.logger.warning(f"{data.current_dt} order failed rv={rv},{context.get_error_msg(rv)}")
+                else:
+                    context.logger.info('多单下单成功')
+                    context.state = S.LONG
+                    return
+            elif direction == 'short':
+                rv = context.sell_open(context.security, 5, limit_price=last_price * 0.99)
+                if rv < 0:
+                    context.logger.warning(f"{data.current_dt} order failed rv={rv},{context.get_error_msg(rv)}")
+                else:
+                    context.logger.info('空单下单成功')
+                    context.state = S.SHORT
+                    return
+
+        if context.state == S.LONG:
+            if direction == 'long':
+                context.logger.info('方向一致，多头延续，继续持有')
+                context.state = S.LONG
+                return
+            elif direction == 'short':
+                context.logger.info('方向逆转，平多头开空头')
+                rv = context.sell_close(context.security, 5, limit_price=last_price * 0.99)
+                if rv < 0:
+                    context.logger.warning(f"{data.current_dt} order failed rv={rv},{context.get_error_msg(rv)}")
+                    context.logger.info('平多头下单失败，等待下一个bar操作')
+                else:
+                    context.logger.info('平多头下单成功')
+                    context.state = S.IDLE
+                    # 不 return，继续循环在同一 bar 开空头
+
+        if context.state == S.SHORT:
+            if direction == 'short':
+                context.logger.info('方向一致，空头延续，继续持有')
+                context.state = S.SHORT
+                return
+            elif direction == 'long':
+                context.logger.info('方向逆转，平空头开多头')
+                rv = context.buy_close(context.security, 5, limit_price=last_price * 1.01)
+                if rv < 0:
+                    context.logger.warning(f"{data.current_dt} order failed rv={rv},{context.get_error_msg(rv)}")
+                    context.logger.info('平空头下单失败，等待下一个bar操作')
+                else:
+                    context.logger.info('平空头下单成功')
+                    context.state = S.IDLE
+                    # 不 return，继续循环在同一 bar 开多头
+
+def handle_trade(context: bigtrader.IContext, trade: bigtrader.ITradeData):
+    """成交回报处理函数"""
+    pass
+
+performance = bigtrader.run(
+    market=bigtrader.Market.CN_FUTURE,
+    frequency=bigtrader.Frequency.DAILY,
+    start_date="2026-06-01",
+    end_date="2026-06-22",
+    instruments=['jm2609.DCE'],
+    capital_base=100000,
+    benchmark="000300.SH",
+    initialize=initialize,
+    before_trading_start=before_trading_start,
+    handle_data=handle_data,
+    handle_trade=handle_trade,
+)
+```
+
+**状态转移：**
+
+| 当前状态 | 信号 | 动作 | 下一状态 |
+|---------|------|------|---------|
+| IDLE | long | buy_open | LONG |
+| IDLE | short | sell_open | SHORT |
+| LONG | long | 持有 | LONG |
+| LONG | short | sell_close → 循环继续 | IDLE → SHORT |
+| SHORT | short | 持有 | SHORT |
+| SHORT | long | buy_close → 循环继续 | IDLE → LONG |
+
+**关键设计点：**
+- 平仓成功后 `state = S.IDLE`，**不 `return`**，`while True` 继续执行开新仓，实现同一 bar 内完成翻转
+- 平仓失败时保持原状态，下一个 bar 重试
+- `handle_data` 开头检查 `context.portfolio.positions`，防止外部状态与内部状态不一致
+- `while True` 内每个状态块用 `if` 而非 `elif`，确保翻转时能落入下一个状态块
